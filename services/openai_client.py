@@ -1,124 +1,126 @@
-# services/openai_client.py
 import os
 import base64
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 
 from openai import OpenAI
 
+# NOTE:
+# - 로컬/배포 모두 환경변수 OPENAI_API_KEY가 반드시 있어야 함
+# - 없으면 여기서 예외 나고 서버가 크래시함
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is missing. Set environment variable OPENAI_API_KEY.")
 
-# -------------------------
-# Lazy client (import 시점에 죽지 않게)
-# -------------------------
-_client: Optional[OpenAI] = None
-
-
-def get_client() -> OpenAI:
-    """
-    OpenAI 클라이언트를 '지연 초기화'한다.
-    - 서버 import 시점에 OPENAI_API_KEY 없어도 크래시 안 남
-    - 실제 요청 처리 시점에 키가 없으면 명확한 에러로 반환 가능
-    """
-    global _client
-    if _client is None:
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set. Set env var or Railway Variables.")
-        _client = OpenAI(api_key=api_key)
-    return _client
+_client = OpenAI(api_key=OPENAI_API_KEY)
 
 
-# -------------------------
-# Text analyze
-# -------------------------
+def _safe_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
+
+
 async def analyze_food_text(text: str) -> Dict[str, Any]:
     """
-    입력 텍스트 기반으로 칼로리/단백질 추정.
-    routers/analyze.py에서 await로 호출하는 형태에 맞춰 async 유지.
+    텍스트 기반 음식 추정.
+    반환 포맷은 routers/analyze.py의 response_model에 맞춤.
     """
-    client = get_client()
-
-    system = "You are a nutrition assistant. Reply in JSON only."
-    user = f"""
-다음 음식(또는 식사 설명)의 대략적인 영양을 추정해서 JSON으로만 답해줘.
-
-요구 JSON 스키마(반드시 이 키를 포함):
-{{
-  "description": "짧은 요약",
-  "calories_kcal": number,
-  "protein_g": number,
-  "confidence": number,   // 0.0~1.0
-  "notes": "불확실성/가정"
-}}
-
-음식: {text}
-"""
-
-    # OpenAI Python SDK(v1) - responses API 사용
-    resp = client.responses.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        input=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+    prompt = (
+        "다음 음식 설명을 바탕으로 칼로리(kcal)와 단백질(g)을 추정해줘.\n"
+        "가능하면 수치 2개를 반드시 포함하고, 불확실하면 confidence를 낮게 줘.\n\n"
+        f"음식: {text}\n\n"
+        "JSON으로만 답해. 스키마:\n"
+        "{"
+        ' "description": string,'
+        ' "calories_kcal": number,'
+        ' "protein_g": number,'
+        ' "confidence": number,'
+        ' "notes": string'
+        "}"
     )
 
-    # responses API 결과 텍스트 추출
-    out_text = getattr(resp, "output_text", None)
-    if not out_text:
-        # 방어 로직
-        raise RuntimeError("OpenAI response has no output_text")
+    resp = _client.chat.completions.create(
+        model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
+        messages=[
+            {"role": "system", "content": "You are a precise nutrition estimation assistant."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
 
-    # JSON 문자열을 그대로 반환(routers 쪽에서 pydantic response_model로 매핑 가능)
-    # 단, 여기서는 파싱까지 하면 더 안전하지만 현재 구조를 모르니 문자열 기반 사용.
-    # routers/analyze.py에서 json.loads를 하고 있으면 그대로 OK.
-    return {"raw": out_text}
+    content = resp.choices[0].message.content or ""
+
+    # 모델이 JSON 외 텍스트를 섞는 경우가 있어서, 최소 방어적으로 파싱 시도
+    import json
+    try:
+        data = json.loads(content)
+    except Exception:
+        # 파싱 실패 시 매우 보수적 fallback
+        data = {
+            "description": "Unparsed response",
+            "calories_kcal": 0,
+            "protein_g": 0,
+            "confidence": 0.1,
+            "notes": content[:500],
+        }
+
+    return {
+        "description": str(data.get("description", "")),
+        "calories_kcal": _safe_float(data.get("calories_kcal", 0)),
+        "protein_g": _safe_float(data.get("protein_g", 0)),
+        "confidence": _safe_float(data.get("confidence", 0.2)),
+        "notes": str(data.get("notes", "")),
+    }
 
 
-# -------------------------
-# Image analyze
-# -------------------------
 async def analyze_food_image(image_b64: str) -> Dict[str, Any]:
     """
-    base64 인코딩된 이미지(바이너리 -> base64 string)를 입력으로 받아 추정.
+    이미지 기반 음식 추정 (간단 버전).
+    - 현재는 "이미지 설명 → 추정" 형태로 처리.
+    - 나중에 Vision 모델로 개선 가능.
     """
-    client = get_client()
-
-    system = "You are a nutrition assistant. Reply in JSON only."
-    user = """
-이미지 속 음식의 대략적인 영양을 추정해서 JSON으로만 답해줘.
-
-요구 JSON 스키마(반드시 이 키를 포함):
-{
-  "description": "짧은 요약",
-  "calories_kcal": number,
-  "protein_g": number,
-  "confidence": number,   // 0.0~1.0
-  "notes": "불확실성/가정"
-}
-"""
-
-    # image_b64가 순수 base64인지, data URL인지 모두 대응
-    if image_b64.startswith("data:"):
-        data_url = image_b64
-    else:
-        data_url = f"data:image/jpeg;base64,{image_b64}"
-
-    resp = client.responses.create(
-        model=os.getenv("OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini")),
-        input=[
-            {"role": "system", "content": system},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": user},
-                    {"type": "input_image", "image_url": data_url},
-                ],
-            },
-        ],
+    # 이미지가 너무 크면 비용/시간 이슈 → 제한 권장
+    prompt = (
+        "다음은 음식 사진의 base64 인코딩 데이터이다.\n"
+        "가능한 한 음식 종류를 추정하고 칼로리(kcal)와 단백질(g)을 추정해줘.\n"
+        "JSON으로만 답해. 스키마:\n"
+        "{"
+        ' "description": string,'
+        ' "calories_kcal": number,'
+        ' "protein_g": number,'
+        ' "confidence": number,'
+        ' "notes": string'
+        "}\n\n"
+        f"image_base64: {image_b64[:2000]}...(truncated)"
     )
 
-    out_text = getattr(resp, "output_text", None)
-    if not out_text:
-        raise RuntimeError("OpenAI response has no output_text")
+    resp = _client.chat.completions.create(
+        model=os.getenv("OPENAI_IMAGE_FALLBACK_MODEL", "gpt-4o-mini"),
+        messages=[
+            {"role": "system", "content": "You are a nutrition assistant."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
 
-    return {"raw": out_text}
+    content = resp.choices[0].message.content or ""
+    import json
+    try:
+        data = json.loads(content)
+    except Exception:
+        data = {
+            "description": "Unparsed response",
+            "calories_kcal": 0,
+            "protein_g": 0,
+            "confidence": 0.1,
+            "notes": content[:500],
+        }
+
+    return {
+        "description": str(data.get("description", "")),
+        "calories_kcal": _safe_float(data.get("calories_kcal", 0)),
+        "protein_g": _safe_float(data.get("protein_g", 0)),
+        "confidence": _safe_float(data.get("confidence", 0.2)),
+        "notes": str(data.get("notes", "")),
+    }

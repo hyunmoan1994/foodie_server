@@ -3,34 +3,33 @@ import time
 from typing import Optional
 
 import httpx
-import jwt
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
 
-router = APIRouter()
+from security import create_access_token
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+router = APIRouter()
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
-# 최종 리다이렉트(프론트가 아직 없으니 서버가 token 보여주는 페이지로 둠)
+# 중요: 구글 로그인 후 돌아갈 URL
+# - Flutter Web/앱이 아직 없으면, 서버에 finish 페이지를 두고 거기로 보내는 게 제일 단순함
 FRONTEND_REDIRECT_URI = os.getenv(
     "FRONTEND_REDIRECT_URI",
     "https://foodieserver-production.up.railway.app/auth/finish",
 )
 
-def _require_env(name: str, value: Optional[str]):
-    if not value:
-        raise RuntimeError(f"Missing env var: {name}")
+if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not GOOGLE_REDIRECT_URI:
+    # 서버는 떠야 하니, 실제 호출 시점에 에러를 던지는 방식으로 처리
+    pass
+
 
 @router.get("/auth/google/login")
 def google_login():
-    _require_env("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID)
-    _require_env("GOOGLE_REDIRECT_URI", GOOGLE_REDIRECT_URI)
+    if not GOOGLE_CLIENT_ID or not GOOGLE_REDIRECT_URI:
+        raise HTTPException(status_code=500, detail="Google OAuth env vars missing")
 
     google_auth_url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
@@ -43,15 +42,13 @@ def google_login():
     )
     return RedirectResponse(url=google_auth_url, status_code=307)
 
+
 @router.get("/auth/google/callback")
 async def google_callback(request: Request, code: Optional[str] = None):
-    _require_env("SECRET_KEY", SECRET_KEY)
-    _require_env("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID)
-    _require_env("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET)
-    _require_env("GOOGLE_REDIRECT_URI", GOOGLE_REDIRECT_URI)
-
     if not code:
         raise HTTPException(status_code=400, detail="Missing code")
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET or not GOOGLE_REDIRECT_URI:
+        raise HTTPException(status_code=500, detail="Google OAuth env vars missing")
 
     # 1) code -> access_token
     async with httpx.AsyncClient(timeout=15.0) as http:
@@ -67,13 +64,10 @@ async def google_callback(request: Request, code: Optional[str] = None):
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
 
-    if token_res.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"token exchange failed: {token_res.text}")
-
     token_data = token_res.json()
     access_token = token_data.get("access_token")
     if not access_token:
-        raise HTTPException(status_code=400, detail="Failed to get access token")
+        raise HTTPException(status_code=400, detail=f"Failed to get access token: {token_data}")
 
     # 2) access_token -> userinfo
     async with httpx.AsyncClient(timeout=15.0) as http:
@@ -81,46 +75,38 @@ async def google_callback(request: Request, code: Optional[str] = None):
             "https://www.googleapis.com/oauth2/v2/userinfo",
             headers={"Authorization": f"Bearer {access_token}"},
         )
-
-    if user_res.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"userinfo failed: {user_res.text}")
-
     user_info = user_res.json()
+
     email = user_info.get("email")
+    name = user_info.get("name", "")
     if not email:
-        raise HTTPException(status_code=400, detail="Failed to get user info (no email)")
+        raise HTTPException(status_code=400, detail=f"Failed to get user info: {user_info}")
 
-    # 3) JWT 발급
-    payload = {
-        "sub": email,
-        "email": email,
-        "exp": int(time.time()) + ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-    }
-    jwt_token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    user_id = email  # 임시로 email을 user_id로 사용
+    jwt_token = create_access_token({"sub": user_id, "email": email, "name": name})
 
-    # 4) finish 페이지로 리다이렉트
-    # FRONTEND_REDIRECT_URI가 이미 /auth/finish면 그대로 쓴다.
+    # 3) 프론트(또는 서버 finish 페이지)로 이동
     redirect_url = f"{FRONTEND_REDIRECT_URI}?token={jwt_token}"
     return RedirectResponse(url=redirect_url, status_code=307)
 
+
 @router.get("/auth/finish", response_class=HTMLResponse)
 def auth_finish(token: Optional[str] = None):
-    # 프론트가 없을 때 token을 눈으로 확인하는 임시 페이지
+    # Flutter가 아직 없으면 여기서 토큰을 눈으로 확인/복사 가능하게 해둔다.
     if not token:
         return HTMLResponse(
-            "<h3>Auth finished</h3><p>No token provided.</p>",
-            status_code=200,
+            "<h3>Auth finished</h3><p>Missing token</p>",
+            status_code=400,
         )
 
     html = f"""
-<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>Auth Finish</title></head>
-  <body style="font-family: Arial, sans-serif; padding: 24px;">
-    <h3>Auth finished</h3>
-    <p>아래 토큰을 앱(Flutter)에서 Authorization Bearer로 사용하면 된다.</p>
-    <textarea style="width: 100%; height: 180px;">{token}</textarea>
-  </body>
-</html>
-"""
+    <html>
+      <head><meta charset="utf-8"/></head>
+      <body style="font-family: Arial, sans-serif; padding: 24px;">
+        <h2>Google Login Success</h2>
+        <p>아래 토큰을 복사해서 Authorization 헤더에 넣으면 /analyze를 테스트할 수 있음.</p>
+        <pre style="white-space: pre-wrap; word-break: break-all; padding: 12px; background: #f2f2f2;">{token}</pre>
+      </body>
+    </html>
+    """
     return HTMLResponse(html, status_code=200)

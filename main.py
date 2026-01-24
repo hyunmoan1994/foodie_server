@@ -3,15 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from routers.analyze import router as analyze_router
 from routers.auth_dev import router as auth_dev_router
-from auth_google import router as google_router  # auth_google.py의 router
+from auth_google import router as google_router
 
-app = FastAPI(title="Foodie Server", version="0.1.0")
+app = FastAPI(title="Foodie Server", version="0.2.0")
 
-# CORS (앱/웹 붙을거라 일단 열어둠)
+# CORS (일단 개발 편의상 전체 허용)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -20,7 +20,7 @@ app.add_middleware(
 def health():
     return {"status": "ok"}
 
-# ===== 라우터 등록 (이게 핵심) =====
-app.include_router(google_router)      # /auth/google/login, /auth/google/callback, /auth/finish
-app.include_router(analyze_router)     # /api/... 라우팅이면 analyze_router 내부 prefix 확인
-app.include_router(auth_dev_router)    # 개발용 auth 있으면 유지
+# Routers
+app.include_router(analyze_router)
+app.include_router(auth_dev_router)
+app.include_router(google_router)
