@@ -1,17 +1,16 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# ✅ 파일 단위 import (중요)
-import meals
-import profile
-import summary
+# ✅ routers 폴더 기준 import
+from routers import meals
+from routers import profile
+from routers import summary
 
 app = FastAPI(
     title="Foodie API",
     version="1.0.0",
 )
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ router 직접 참조
+# ✅ router 등록
 app.include_router(meals.router)
 app.include_router(profile.router)
 app.include_router(summary.router)
