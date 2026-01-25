@@ -1,126 +1,99 @@
 import os
-import base64
-from typing import Dict, Any
-
+import json
+from typing import Any, Dict
 from openai import OpenAI
 
-# NOTE:
-# - 로컬/배포 모두 환경변수 OPENAI_API_KEY가 반드시 있어야 함
-# - 없으면 여기서 예외 나고 서버가 크래시함
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is missing. Set environment variable OPENAI_API_KEY.")
+_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-_client = OpenAI(api_key=OPENAI_API_KEY)
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def _safe_float(x, default=0.0) -> float:
+def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
         return float(x)
     except Exception:
-        return float(default)
+        return default
 
 
-async def analyze_food_text(text: str) -> Dict[str, Any]:
-    """
-    텍스트 기반 음식 추정.
-    반환 포맷은 routers/analyze.py의 response_model에 맞춤.
-    """
-    prompt = (
-        "다음 음식 설명을 바탕으로 칼로리(kcal)와 단백질(g)을 추정해줘.\n"
-        "가능하면 수치 2개를 반드시 포함하고, 불확실하면 confidence를 낮게 줘.\n\n"
-        f"음식: {text}\n\n"
-        "JSON으로만 답해. 스키마:\n"
-        "{"
-        ' "description": string,'
-        ' "calories_kcal": number,'
-        ' "protein_g": number,'
-        ' "confidence": number,'
-        ' "notes": string'
-        "}"
-    )
+def _normalize_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    desc = str(payload.get("description", "")).strip()
+    calories = _safe_float(payload.get("calories_kcal", 0.0), 0.0)
+    protein = _safe_float(payload.get("protein_g", 0.0), 0.0)
+    conf = _safe_float(payload.get("confidence", 0.1), 0.1)
+    notes = str(payload.get("notes", "")).strip()
 
-    resp = _client.chat.completions.create(
-        model=os.getenv("OPENAI_TEXT_MODEL", "gpt-4o-mini"),
-        messages=[
-            {"role": "system", "content": "You are a precise nutrition estimation assistant."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.2,
-    )
-
-    content = resp.choices[0].message.content or ""
-
-    # 모델이 JSON 외 텍스트를 섞는 경우가 있어서, 최소 방어적으로 파싱 시도
-    import json
-    try:
-        data = json.loads(content)
-    except Exception:
-        # 파싱 실패 시 매우 보수적 fallback
-        data = {
-            "description": "Unparsed response",
-            "calories_kcal": 0,
-            "protein_g": 0,
-            "confidence": 0.1,
-            "notes": content[:500],
-        }
+    warnings = []
+    if conf < 0.5:
+        warnings.append("confidence_low")
+    if calories <= 0 and protein <= 0:
+        warnings.append("nutrition_unknown")
 
     return {
-        "description": str(data.get("description", "")),
-        "calories_kcal": _safe_float(data.get("calories_kcal", 0)),
-        "protein_g": _safe_float(data.get("protein_g", 0)),
-        "confidence": _safe_float(data.get("confidence", 0.2)),
-        "notes": str(data.get("notes", "")),
+        "description": desc or "추정 불가",
+        "calories_kcal": calories,
+        "protein_g": protein,
+        "confidence": conf,
+        "notes": notes,
+        "warnings": warnings,
     }
 
 
-async def analyze_food_image(image_b64: str) -> Dict[str, Any]:
-    """
-    이미지 기반 음식 추정 (간단 버전).
-    - 현재는 "이미지 설명 → 추정" 형태로 처리.
-    - 나중에 Vision 모델로 개선 가능.
-    """
-    # 이미지가 너무 크면 비용/시간 이슈 → 제한 권장
-    prompt = (
-        "다음은 음식 사진의 base64 인코딩 데이터이다.\n"
-        "가능한 한 음식 종류를 추정하고 칼로리(kcal)와 단백질(g)을 추정해줘.\n"
-        "JSON으로만 답해. 스키마:\n"
-        "{"
-        ' "description": string,'
-        ' "calories_kcal": number,'
-        ' "protein_g": number,'
-        ' "confidence": number,'
-        ' "notes": string'
-        "}\n\n"
-        f"image_base64: {image_b64[:2000]}...(truncated)"
+def analyze_food_text(text: str) -> Dict[str, Any]:
+    system = (
+        "You are a nutrition estimation engine. "
+        "Return ONLY valid JSON object with keys: "
+        "description (string, Korean), calories_kcal (number), protein_g (number), confidence (0-1), notes (string, Korean). "
+        "Do not wrap in markdown. No code fences."
     )
+    user = f"입력 텍스트: {text}\n위 조건에 맞는 JSON만 반환."
 
     resp = _client.chat.completions.create(
-        model=os.getenv("OPENAI_IMAGE_FALLBACK_MODEL", "gpt-4o-mini"),
+        model=MODEL,
         messages=[
-            {"role": "system", "content": "You are a nutrition assistant."},
-            {"role": "user", "content": prompt},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
         ],
+        response_format={"type": "json_object"},
         temperature=0.2,
     )
 
-    content = resp.choices[0].message.content or ""
-    import json
+    content = resp.choices[0].message.content or "{}"
     try:
-        data = json.loads(content)
+        payload = json.loads(content)
     except Exception:
-        data = {
-            "description": "Unparsed response",
-            "calories_kcal": 0,
-            "protein_g": 0,
-            "confidence": 0.1,
-            "notes": content[:500],
-        }
+        payload = {"description": "Unparsed response", "calories_kcal": 0, "protein_g": 0, "confidence": 0.1, "notes": content}
 
-    return {
-        "description": str(data.get("description", "")),
-        "calories_kcal": _safe_float(data.get("calories_kcal", 0)),
-        "protein_g": _safe_float(data.get("protein_g", 0)),
-        "confidence": _safe_float(data.get("confidence", 0.2)),
-        "notes": str(data.get("notes", "")),
-    }
+    return _normalize_result(payload)
+
+
+def analyze_food_image(image_b64: str) -> Dict[str, Any]:
+    system = (
+        "You are a nutrition estimation engine for food images. "
+        "Return ONLY valid JSON object with keys: "
+        "description (string, Korean), calories_kcal (number), protein_g (number), confidence (0-1), notes (string, Korean). "
+        "Do not wrap in markdown. No code fences."
+    )
+
+    resp = _client.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "사진을 보고 음식과 대략 영양을 추정해서 JSON만 반환."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+                ],
+            },
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.2,
+    )
+
+    content = resp.choices[0].message.content or "{}"
+    try:
+        payload = json.loads(content)
+    except Exception:
+        payload = {"description": "Unparsed response", "calories_kcal": 0, "protein_g": 0, "confidence": 0.1, "notes": content}
+
+    return _normalize_result(payload)
