@@ -1,31 +1,29 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# 라우터 import
-from meals import router as meals_router
-from profile import router as profile_router
-from summary import router as summary_router
+# ✅ 파일 단위 import (중요)
+import meals
+import profile
+import summary
 
 app = FastAPI(
     title="Foodie API",
     version="1.0.0",
 )
 
-# CORS (Flutter 앱 대응)
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 나중에 앱 도메인으로 제한 가능
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# === 핵심 ===
-# 실제 API 등록
-app.include_router(meals_router)
-app.include_router(profile_router)
-app.include_router(summary_router)
-
+# ✅ router 직접 참조
+app.include_router(meals.router)
+app.include_router(profile.router)
+app.include_router(summary.router)
 
 @app.get("/")
 def health_check():
