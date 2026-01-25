@@ -1,10 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# ✅ routers 폴더 기준 import
-from routers import meals
-from routers import profile
-from routers import summary
+# routers 패키지에서 import (정답)
+from routers.meals import router as meals_router
+from routers.profile import router as profile_router
+from routers.summary import router as summary_router
 
 app = FastAPI(
     title="Foodie API",
@@ -19,10 +19,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ router 등록
-app.include_router(meals.router)
-app.include_router(profile.router)
-app.include_router(summary.router)
+# 라우터 등록
+app.include_router(meals_router)
+app.include_router(profile_router)
+app.include_router(summary_router)
 
 @app.get("/")
 def health_check():
