@@ -3,15 +3,19 @@ from pydantic import BaseModel
 
 from security import create_access_token
 
-router = APIRouter()
+router = APIRouter(prefix="/auth/dev", tags=["auth-dev"])
 
 
 class DevLoginRequest(BaseModel):
-    email: str = "dev@example.com"
-    user_id: str = "dev-user"
+    email: str
+    user_id: str
 
 
-@router.post("/auth/dev/login")
+@router.post("/login")
 def dev_login(req: DevLoginRequest):
-    token = create_access_token({"sub": req.user_id, "email": req.email})
+    """
+    개발/테스트용 로그인.
+    실제 운영에서는 제거하거나 IP 제한/비활성화 권장.
+    """
+    token = create_access_token(subject=req.user_id, email=req.email)
     return {"token": token}
